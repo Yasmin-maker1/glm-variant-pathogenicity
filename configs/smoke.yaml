@@ -1,0 +1,12 @@
+# Tiny settings for a quick end-to-end check on a laptop or a free Colab GPU.
+inherit: default.yaml
+
+training:
+  batch_size: 8
+  micro_batch_size: 4
+  epochs: 1
+  num_workers: 0
+
+evaluation:
+  bootstrap: 100
+  seeds: [0]
