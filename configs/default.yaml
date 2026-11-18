@@ -1,0 +1,48 @@
+# Default experiment configuration (mirrors Module C, Section III).
+
+paths:
+  raw: data/raw
+  processed: data/processed
+  runs: results/runs
+  reports: results/report
+
+data:
+  clinvar_vcf: data/raw/clinvar.vcf.gz          # fixed monthly GRCh38 release (record the date!)
+  reference_fasta: data/raw/GRCh38.fa            # indexed (samtools faidx)
+  vep_tsv: null                                  # optional: VEP output; default uses ClinVar MC field
+  min_review_stars: 1                            # "criteria provided" or better
+  drop_multi_gene: true                          # keeps the gene split clean
+  window_bp: 1024                                # same window for every model
+  extra_windows_bp: [8192, 32768]                # HyenaDNA long-context experiment
+  split_fractions: [0.8, 0.1, 0.1]               # by gene
+  split_seed: 13
+
+training:
+  batch_size: 32            # effective batch size
+  micro_batch_size: 8       # per step; gradient accumulation fills the rest
+  epochs: 10
+  patience: 2               # early stopping on validation AUROC
+  learning_rate: 3.0e-5     # grid: 1e-5, 3e-5, 1e-4 (see scripts/run_all.sh)
+  head_learning_rate: 1.0e-3
+  weight_decay: 0.01
+  pool_radius: 32           # bp on each side of the variant used for pooling
+  num_workers: 2
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+
+head:
+  head_hidden: 256
+  dropout: 0.1
+
+cadd:
+  whole_genome_tsv: data/raw/whole_genome_SNVs.tsv.gz   # CADD v1.7, GRCh38
+  scored_table: null                                    # or a TSV from the CADD web service
+  column: PHRED
+
+evaluation:
+  bootstrap: 1000
+  seeds: [0, 1, 2]
+  train_fractions: [0.1, 0.25, 0.5, 1.0]
