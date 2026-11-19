@@ -16,7 +16,10 @@ from torch import nn
 def backbone_hidden_states(backbone: nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
     """Return [batch, tokens, hidden] for HF models with differing output types."""
     kwargs = {"input_ids": input_ids}
-    params = inspect.signature(backbone.forward).parameters
+    # A PEFT wrapper exposes forward(*args, **kwargs); read the real signature
+    # from the wrapped model so attention_mask is still passed through.
+    target = backbone.get_base_model() if hasattr(backbone, "get_base_model") else backbone
+    params = inspect.signature(target.forward).parameters
     if attention_mask is not None and "attention_mask" in params:
         kwargs["attention_mask"] = attention_mask
     if "output_hidden_states" in params:
