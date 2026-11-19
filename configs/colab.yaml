@@ -1,0 +1,34 @@
+# Reduced run for a free Google Colab T4 GPU (~2-3 hours in total).
+# Differences from the full plan (configs/default.yaml), to report honestly:
+#   * a random subset of each gene-level split (split itself unchanged)
+#   * one seed, a fixed learning rate (no grid search), up to 3 epochs
+#   * results and processed data are written to Google Drive so a
+#     disconnected session can resume where it stopped
+inherit: default.yaml
+
+paths:
+  raw: /content/data/raw
+  processed: /content/drive/MyDrive/glm-variant-pathogenicity/processed
+  runs: /content/drive/MyDrive/glm-variant-pathogenicity/runs
+  reports: /content/drive/MyDrive/glm-variant-pathogenicity/report
+
+data:
+  clinvar_vcf: /content/data/raw/clinvar.vcf.gz
+  reference_fasta: /content/data/raw/hg38.fa
+  max_variants_per_split: {train: 24000, val: 3000, test: 4000}
+
+training:
+  batch_size: 32
+  micro_batch_size: 16
+  epochs: 3
+  patience: 1
+  learning_rate: 1.0e-4
+  head_learning_rate: 1.0e-3
+  num_workers: 2
+
+cadd:
+  whole_genome_tsv: https://kircherlab.bihealth.org/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz
+
+evaluation:
+  bootstrap: 1000
+  seeds: [0]
