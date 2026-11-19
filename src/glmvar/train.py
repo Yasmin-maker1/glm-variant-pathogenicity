@@ -56,8 +56,12 @@ class PairCollator:
 
     def __call__(self, batch):
         ref, alt, y = zip(*batch)
-        r_ids, r_attn, r_pool = self._encode(list(ref))
-        a_ids, a_attn, a_pool = self._encode(list(alt))
+        # Encode ref and alt together so both are padded to the same length
+        # (BPE can split the two windows into a different number of tokens).
+        ids, attn, pool = self._encode(list(ref) + list(alt))
+        n = len(ref)
+        r_ids, r_attn, r_pool = ids[:n], attn[:n], pool[:n]
+        a_ids, a_attn, a_pool = ids[n:], attn[n:], pool[n:]
         return {
             "ref_ids": r_ids, "ref_attn": r_attn, "ref_pool": r_pool,
             "alt_ids": a_ids, "alt_attn": a_attn, "alt_pool": a_pool,
@@ -69,11 +73,22 @@ def _to(batch: dict, device) -> dict:
     return {k: v.to(device) for k, v in batch.items()}
 
 
+_AMP = {"enabled": True}
+
+
+def _amp_dtype(device):
+    """bfloat16 on Ampere or newer, float16 on older GPUs (e.g. a T4), off on CPU."""
+    if device.type != "cuda" or not _AMP["enabled"]:
+        return None
+    major, _ = torch.cuda.get_device_capability(device)
+    return torch.bfloat16 if major >= 8 else torch.float16
+
+
 def _autocast(device):
-    if device.type == "cuda":
-        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        return torch.autocast("cuda", dtype=dtype)
-    return torch.autocast("cpu", enabled=False)
+    dtype = _amp_dtype(device)
+    if dtype is None:
+        return torch.autocast("cpu", enabled=False)
+    return torch.autocast("cuda", dtype=dtype)
 
 
 @torch.no_grad()
@@ -102,6 +117,7 @@ def train_model(model, tokenizer, df: pd.DataFrame, cfg: dict, out_dir: str | Pa
     model.to(device)
 
     t = cfg.get("training", {})
+    _AMP["enabled"] = bool(t.get("amp", True))
     micro_bs = int(t.get("micro_batch_size", 8))
     eff_bs = int(t.get("batch_size", 32))
     accum = max(1, eff_bs // micro_bs)
@@ -129,6 +145,10 @@ def train_model(model, tokenizer, df: pd.DataFrame, cfg: dict, out_dir: str | Pa
         groups.append({"params": bb_params, "lr": lr})
     opt = torch.optim.AdamW(groups, weight_decay=wd)
 
+    # float16 (e.g. a Colab T4) needs loss scaling; bfloat16 and CPU do not.
+    scaler = torch.amp.GradScaler("cuda", enabled=_amp_dtype(device) == torch.float16)
+    all_params = [p for g in groups for p in g["params"]]
+
     tracker = ResourceTracker()
     best_auc, best_state, bad_epochs, history = -1.0, None, 0, []
     with tracker.track():
@@ -142,12 +162,16 @@ def train_model(model, tokenizer, df: pd.DataFrame, cfg: dict, out_dir: str | Pa
                 with _autocast(device):
                     logits = model(**batch)
                 loss = loss_fn(logits.float(), labels) / accum
-                loss.backward()
+                scaler.scale(loss).backward()
                 running += loss.item() * accum
                 if step % accum == 0 or step == len(train_loader):
-                    torch.nn.utils.clip_grad_norm_([p for g in groups for p in g["params"]], 1.0)
-                    opt.step()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+                    scaler.step(opt)
+                    scaler.update()
                     opt.zero_grad(set_to_none=True)
+                if step % 200 == 0:
+                    LOG.info("epoch %d  step %d/%d  loss %.4f", epoch, step, len(train_loader), running / step)
             val_pred = predict(model, eval_loaders["val"], device)
             val_auc = roc_auc_score(parts["val"]["label"], val_pred) if parts["val"]["label"].nunique() > 1 else float("nan")
             history.append({"epoch": epoch, "train_loss": running / max(1, len(train_loader)), "val_auroc": val_auc})
