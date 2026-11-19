@@ -24,8 +24,16 @@ from .models.tokens import token_index_at, token_spans
 def load_mlm(hf_id: str):
     from transformers import AutoModelForMaskedLM, AutoTokenizer
 
+    kw = {"trust_remote_code": True}
+    if "DNABERT-2" in hf_id:
+        from transformers.models.bert.configuration_bert import BertConfig
+
+        kw["config"] = BertConfig.from_pretrained(hf_id)
     tok = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
-    model = AutoModelForMaskedLM.from_pretrained(hf_id, trust_remote_code=True)
+    model = AutoModelForMaskedLM.from_pretrained(hf_id, **kw)
+    from .models.loading import disable_dnabert2_triton
+
+    disable_dnabert2_triton()
     return model, tok
 
 
@@ -63,6 +71,8 @@ def llr_scores(model, tokenizer, df: pd.DataFrame, batch_size: int = 16, device:
             kwargs["attention_mask"] = enc["attention_mask"].to(device)
         out = model(**kwargs)
         logits = out.logits if hasattr(out, "logits") else out[0]
+        if logits.dim() != 3 or logits.shape[1] != ids.shape[1]:
+            raise RuntimeError(f"unexpected MLM logits shape {tuple(logits.shape)}; zero-shot not supported for this model")
         logp = torch.log_softmax(logits.float(), dim=-1)
         for b, ti, ref_id, alt_id in targets:
             llr = (logp[b, ti, alt_id] - logp[b, ti, ref_id]).item()
