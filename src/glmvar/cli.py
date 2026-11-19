@@ -40,6 +40,13 @@ def cmd_build_dataset(cfg, args):
         df = merge_vep(df, read_vep_tab(d["vep_tsv"]))
     df = gene_split(df, tuple(d["split_fractions"]), seed=d["split_seed"])
     check_no_leakage(df)
+    caps = d.get("max_variants_per_split")
+    if caps:
+        # Reduced-compute run: random sample within each gene-level split
+        # (the split itself is unchanged, so there is still no gene leakage).
+        df = pd.concat([g.sample(min(len(g), int(caps[s])), random_state=d["split_seed"]) if s in caps else g
+                        for s, g in df.groupby("split")]).reset_index(drop=True)
+        LOG.info("subsampled to %s", df.split.value_counts().to_dict())
     genome = ReferenceGenome(d["reference_fasta"])
     windows = sorted({d["window_bp"], *d.get("extra_windows_bp", [])}) if args.all_windows else [d["window_bp"]]
     stats = {}
@@ -56,11 +63,16 @@ def cmd_build_dataset(cfg, args):
 
 def cmd_train(cfg, args):
     from .data.split import subsample_train_genes
-    from .models.loading import build_classifier, count_trainable, load_tokenizer
+    from .models import loading
     from .models.registry import get_spec
     from .train import train_model
 
     spec = get_spec(args.model)
+    name = args.run_name or f"{spec.key}_{args.mode}" + (f"_w{args.window}" if args.window else "") + (f"_frac{args.train_fraction:g}" if args.train_fraction < 1 else "")
+    out = Path(cfg["paths"]["runs"]) / name / f"seed{args.seed}"
+    if args.skip_existing and (out / "summary.json").exists():
+        LOG.info("skipping %s (already done)", out)
+        return
     df = pd.read_parquet(_variants_path(cfg, args.window))
     if args.train_fraction < 1:
         df = subsample_train_genes(df, args.train_fraction, seed=args.seed)
@@ -68,12 +80,14 @@ def cmd_train(cfg, args):
         df = df.groupby("split", group_keys=False).apply(lambda g: g.sample(min(len(g), args.limit), random_state=0))
     if args.learning_rate:
         cfg["training"]["learning_rate"] = args.learning_rate
-    tok = load_tokenizer(spec)
-    model = build_classifier(spec, args.mode, lora_cfg=cfg.get("lora"), head_cfg=cfg.get("head"))
-    trainable, total = count_trainable(model)
+    if spec.key.startswith("hyenadna"):
+        # HyenaDNA's FFT long convolutions are not reliable in float16; the
+        # model is small, so it trains in full precision.
+        cfg["training"]["amp"] = False
+    tok = loading.load_tokenizer(spec)
+    model = loading.build_classifier(spec, args.mode, lora_cfg=cfg.get("lora"), head_cfg=cfg.get("head"))
+    trainable, total = loading.count_trainable(model)
     LOG.info("%s/%s: %.2fM trainable of %.1fM parameters", spec.key, args.mode, trainable / 1e6, total / 1e6)
-    name = args.run_name or f"{spec.key}_{args.mode}" + (f"_w{args.window}" if args.window else "") + (f"_frac{args.train_fraction:g}" if args.train_fraction < 1 else "")
-    out = Path(cfg["paths"]["runs"]) / name / f"seed{args.seed}"
     summary = train_model(model, tok, df, cfg, out, seed=args.seed)
     summary.update({"model": spec.key, "hf_id": spec.hf_id, "mode": args.mode, "trainable_params": trainable,
                     "total_params": total, "train_fraction": args.train_fraction, "window_bp": args.window or cfg["data"]["window_bp"]})
@@ -148,6 +162,7 @@ def main(argv=None):
     t.add_argument("--window", type=int, help="window length in bp (default: data.window_bp)")
     t.add_argument("--limit", type=int, help="debug: cap variants per split")
     t.add_argument("--run-name")
+    t.add_argument("--skip-existing", action="store_true", help="do nothing if this run already finished")
     z = sub.add_parser("zeroshot")
     z.add_argument("--model", required=True)
     z.add_argument("--batch-size", type=int, default=16)
