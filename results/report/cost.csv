@@ -1,0 +1,5 @@
+run,best_val_auroc,epochs,gpu_hours,peak_gpu_mem_gb,variants_per_s,trainable_M
+hyenadna_medium_finetune,0.5909,3,0.9321,6.6472,55.5351,6.7476
+hyenadna_medium_frozen,0.5628,2,0.2324,1.7054,56.7482,0.1971
+nt_v2_250m_finetune,0.9523,3,1.026,8.2466,45.7614,1.4751
+nt_v2_250m_frozen,0.8464,3,0.4222,1.7402,48.9334,0.5903
