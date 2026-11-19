@@ -91,3 +91,52 @@ def test_training_learns_toy_signal(tmp_path):
     assert summary["best_val_auroc"] > 0.8
     test = pd.read_csv(tmp_path / "predictions_test.csv")
     assert len(test) == 48 and test.score.between(0, 1).all()
+
+
+def test_disable_dnabert2_triton_patches_loaded_module():
+    import sys
+    import types
+
+    from glmvar.models.loading import disable_dnabert2_triton
+
+    fake = types.ModuleType("transformers_modules.zhihan1996.DNABERT_2_117M.abc.bert_layers")
+    fake.flash_attn_qkvpacked_func = lambda *a: None
+    sys.modules[fake.__name__] = fake
+    try:
+        assert disable_dnabert2_triton() == 1
+        assert fake.flash_attn_qkvpacked_func is None
+        assert disable_dnabert2_triton() == 0
+    finally:
+        del sys.modules[fake.__name__]
+
+
+class BpeLikeTokenizer(CharTokenizer):
+    """Merges 'AA' into one token, so ref and alt can get different lengths."""
+
+    vocab = {**CharTokenizer.vocab, "AA": 9}
+    inv = {v: k for k, v in vocab.items()}
+
+    def __call__(self, seqs, padding="longest", return_tensors="pt", add_special_tokens=True):
+        ids = []
+        for s in seqs:
+            out, i = [1], 0
+            while i < len(s):
+                if s[i : i + 2] == "AA":
+                    out.append(9); i += 2
+                else:
+                    out.append(self.vocab.get(s[i], 3)); i += 1
+            ids.append(out)
+        L = max(map(len, ids))
+        attn = [[1] * len(x) + [0] * (L - len(x)) for x in ids]
+        ids = [x + [0] * (L - len(x)) for x in ids]
+        return {"input_ids": torch.tensor(ids), "attention_mask": torch.tensor(attn)}
+
+
+def test_collator_pads_ref_and_alt_to_same_length():
+    from glmvar.train import PairCollator
+
+    batch = PairCollator(BpeLikeTokenizer(), pool_radius=1)([("CCAACC", "CCATCC", 1.0)])
+    assert batch["ref_ids"].shape == batch["alt_ids"].shape
+    model = PairClassifier(TinyEncoder(vocab=10), 16)
+    out = model(**{k: v for k, v in batch.items() if k != "labels"})
+    assert out.shape == (1,)
