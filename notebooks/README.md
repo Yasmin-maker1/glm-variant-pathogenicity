@@ -1,0 +1,150 @@
+# Fine-Tuning Genomic Language Models for Variant Pathogenicity
+
+**Do modern DNA language models beat a mature, feature-engineered tool at telling pathogenic from benign variants, and under what conditions?**
+
+This repository contains the full experimental pipeline for my CSCI 7610 Graduate Technical Seminar project (Georgia Southern University). It fine-tunes three publicly available genomic language models on ClinVar single-nucleotide variants and compares them, under academic-scale compute, with each other and with **CADD v1.7**.
+
+| Model | Checkpoint | Architecture | Tokens | Fine-tuning |
+|---|---|---|---|---|
+| DNABERT-2 | `zhihan1996/DNABERT-2-117M` | Transformer encoder | BPE | LoRA (r=8, α=16) |
+| Nucleotide Transformer v2 | `InstaDeepAI/nucleotide-transformer-v2-250m-multi-species` | Transformer encoder | 6-mers | LoRA (r=8, α=16) |
+| HyenaDNA | `LongSafari/hyenadna-medium-160k-seqlen-hf` | Hyena long convolutions | single nt | Full |
+| **Baseline:** CADD v1.7 | precomputed PHRED scores | Feature-engineered | – | not retrained |
+
+> **Status:** pipeline implemented and tested. A first, reduced run (31,000 ClinVar variants, one seed, ≤3 epochs on a free Colab T4 GPU) is complete; results are below and in [`results/`](results/). The full study (all data, 3 seeds, learning-rate search) is next.
+
+### First results (reduced run, test set of 4,000 variants, 10.7% pathogenic)
+
+| Method | AUROC [95% CI] | AUPRC | MCC | Missense-only AUROC |
+|---|---|---|---|---|
+| CADD v1.7 | **0.997** [0.995, 0.998] | 0.958 | 0.913 | **0.962** |
+| Nucleotide Transformer v2, fine-tuned (LoRA) | 0.966 [0.957, 0.974] | 0.860 | 0.745 | 0.750 |
+| DNABERT-2, fine-tuned (LoRA) | 0.845 [0.823, 0.867] | 0.648 | 0.582 | 0.690 |
+| HyenaDNA, fine-tuned | 0.614 [0.585, 0.643] | 0.189 | 0.106 | 0.595 |
+| Nucleotide Transformer v2, frozen | 0.860 [0.839, 0.879] | 0.564 | 0.462 | 0.643 |
+| DNABERT-2, frozen | 0.736 [0.711, 0.764] | 0.362 | 0.274 | 0.683 |
+| Nucleotide Transformer v2, zero-shot | 0.542 [0.512, 0.573] | 0.133 | 0.046 | 0.572 |
+
+Every language model is significantly below CADD (DeLong's test, p < 0.001). Fine-tuning adds about 0.11 AUROC over a frozen backbone for both transformers. ClinVar release 2026-11-15; split by gene (80/10/10) with a random subset of each split.
+
+---
+
+## Method at a glance
+
+```
+ClinVar (GRCh38, fixed release)
+  └─ SNVs, ≥1 review star, P/LP = 1 vs B/LB = 0 (VUS & conflicting removed)
+      └─ 1,024-bp reference window + alternate window (variant at center)
+          └─ split BY GENE: 80 / 10 / 10  (no gene in two splits)
+              ├─ DNABERT-2  ─┐
+              ├─ NT v2 250M ─┼─ shared ref/alt pair classifier → P(pathogenic)
+              ├─ HyenaDNA   ─┘
+              └─ CADD v1.7 PHRED (lookup)
+                  └─ same test set: AUROC, AUPRC, F1, MCC, bootstrap 95% CI, DeLong vs CADD
+```
+
+**Pair classifier.** The reference and alternate windows pass through the same backbone. Token embeddings within ±32 bp of the variant are averaged, and `[ref, alt, alt − ref]` goes to a two-layer head. Training uses class-weighted BCE, AdamW, mixed precision, an effective batch of 32, up to 10 epochs and early stopping (patience 2) on validation AUROC.
+
+**Research questions → experiments** (Module C, Table 2)
+
+| Question | Experiment | Measurement |
+|---|---|---|
+| Do fine-tuned models beat CADD? | fine-tune each model; score test set with CADD | AUROC (primary), AUPRC, F1, MCC + 95% CI; DeLong's test |
+| How do the models compare? | same data, window, head and budget; 3 seeds | same metrics, mean ± SD |
+| Under what conditions? | per-consequence evaluation; HyenaDNA with 8 kb / 32 kb windows | metrics per consequence type and window |
+| How much does fine-tuning add? | frozen-backbone head; zero-shot masked LLR | ΔAUROC fine-tuned vs frozen vs zero-shot |
+| What does it cost? | resource logging; 10/25/50/100% of training genes | GPU-hours, peak memory, variants/s, learning curves |
+
+---
+
+## Repository layout
+
+```
+configs/            default.yaml (full study), colab.yaml (reduced Colab run), smoke.yaml
+notebooks/          run_experiments_colab.ipynb
+scripts/            download_data.sh, run_all.sh, pick_learning_rates.py
+src/glmvar/
+  data/             clinvar.py · sequences.py · split.py · vep.py
+  models/           registry.py · tokens.py · classifier.py · loading.py
+  train.py          fine-tuning / frozen training loop
+  zeroshot.py       masked-LM log-likelihood-ratio scores
+  cadd.py           CADD v1.7 lookup
+  metrics.py        AUROC/AUPRC/F1/MCC, bootstrap CI, DeLong test
+  evaluate.py       results tables;  plots.py  ROC + learning curves
+  cli.py            `glmvar` command
+tests/              offline unit tests (tiny genome, toy encoder)
+docs/               methodology notes
+results/            tables and figures (generated)
+```
+
+## Quick start
+
+```bash
+git clone https://github.com/Yasmin-maker1/glm-variant-pathogenicity.git
+cd glm-variant-pathogenicity
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[bio,dev]"
+pytest -q                                   # offline tests, CPU only
+```
+
+A GPU with 16–24 GB (for example an A10, L4, RTX 4090, or Colab/Kaggle T4 for small runs) is enough for every experiment.
+
+### 1. Data
+
+```bash
+bash scripts/download_data.sh               # ClinVar + GRCh38 (+ CADD with DOWNLOAD_CADD=1)
+glmvar build-dataset --all-windows          # → data/processed/variants_w1024.parquet (+ 8 kb, 32 kb)
+```
+
+### 2. One run
+
+```bash
+glmvar train --model dnabert2 --mode finetune --seed 0
+glmvar train --model nt_v2_250m --mode frozen --seed 0
+glmvar zeroshot --model nt_v2_250m
+glmvar cadd
+glmvar report                               # → results/report/RESULTS.md, roc_test.png, learning_curves.png
+```
+
+Smoke test with tiny settings: `glmvar --config configs/smoke.yaml train --model hyenadna_medium --limit 200`.
+
+### 3. Full study
+
+```bash
+bash scripts/run_all.sh
+```
+
+### Run on Google Colab (free GPU)
+
+Open [`notebooks/run_experiments_colab.ipynb`](notebooks/run_experiments_colab.ipynb) in Colab, choose a T4 GPU and **Run all**. It uses `configs/colab.yaml` (reduced run, ~3–4 hours), saves progress to Google Drive and ends by downloading `results_bundle.zip`. CADD scores are read directly from the CADD server, so the 80 GB file is not needed.
+
+### CADD baseline without the 80 GB file
+
+Run `glmvar export-vcf`, upload `data/processed/variants.vcf` to the [CADD web service](https://cadd.bihealth.org/score) (v1.7, GRCh38), download the result and set `cadd.scored_table` in the config.
+
+## Reproducibility
+
+Every run writes `results/runs/<method>/seed<k>/` with `predictions_val.csv`, `predictions_test.csv` and `summary.json` (seed, epochs, validation AUROC, GPU-hours, peak GPU memory, variants per second, trainable parameters). Record the ClinVar release date and the commit hash with your results.
+
+## Limitations
+
+ClinVar labels contain errors and favor well-studied genes and populations. Only SNVs are studied (no indels or structural variants). The common 1,024-bp window and modest budget may understate what each model can do with longer context or larger checkpoints. This is deliberate: the goal is a comparison under realistic academic conditions.
+
+## Key references
+
+- Zhou, Z. et al. (2024). DNABERT-2. *ICLR 2024*.
+- Dalla-Torre, H. et al. (2025). Nucleotide Transformer. *Nature Methods*, 22, 287–297.
+- Nguyen, E. et al. (2023). HyenaDNA. *NeurIPS 2023*.
+- Schubach, M. et al. (2024). CADD v1.7. *Nucleic Acids Research*.
+- Kircher, M. et al. (2014). CADD. *Nature Genetics*.
+- Landrum, M. J. et al. (2018). ClinVar. *Nucleic Acids Research*, 46(D1).
+- Richards, S. et al. (2015). ACMG/AMP guidelines. *Genetics in Medicine*, 17(5).
+- Marin, F. I. et al. (2024). BEND. *ICLR 2024*.
+- Hu, E. J. et al. (2022). LoRA. *ICLR 2022*.
+- DeLong, E. R. et al. (1988). *Biometrics*, 44(3).
+
+## Author
+
+Yasmin Orduz · CSCI 7610 Graduate Technical Seminar · Georgia Southern University · Advisor: Dr. Ray Hashemi
+
+MIT License.
