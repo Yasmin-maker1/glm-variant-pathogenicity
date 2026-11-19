@@ -11,7 +11,21 @@ This repository contains the full experimental pipeline for my CSCI 7610 Graduat
 | HyenaDNA | `LongSafari/hyenadna-medium-160k-seqlen-hf` | Hyena long convolutions | single nt | Full |
 | **Baseline:** CADD v1.7 | precomputed PHRED scores | Feature-engineered | – | not retrained |
 
-> **Status:** pipeline implemented and unit-tested; experiments on the full ClinVar dataset are in progress. Results will appear in [`results/`](results/).
+> **Status:** pipeline implemented and tested. A first, reduced run (31,000 ClinVar variants, one seed, ≤3 epochs on a free Colab T4 GPU) is complete; results are below and in [`results/`](results/). The full study (all data, 3 seeds, learning-rate search) is next.
+
+### First results (reduced run, test set of 4,000 variants, 10.7% pathogenic)
+
+| Method | AUROC [95% CI] | AUPRC | MCC | Missense-only AUROC |
+|---|---|---|---|---|
+| CADD v1.7 | **0.997** [0.995, 0.998] | 0.958 | 0.913 | **0.962** |
+| Nucleotide Transformer v2, fine-tuned (LoRA) | 0.966 [0.957, 0.974] | 0.860 | 0.745 | 0.750 |
+| DNABERT-2, fine-tuned (LoRA) | 0.845 [0.823, 0.867] | 0.648 | 0.582 | 0.690 |
+| HyenaDNA, fine-tuned | 0.614 [0.585, 0.643] | 0.189 | 0.106 | 0.595 |
+| Nucleotide Transformer v2, frozen | 0.860 [0.839, 0.879] | 0.564 | 0.462 | 0.643 |
+| DNABERT-2, frozen | 0.736 [0.711, 0.764] | 0.362 | 0.274 | 0.683 |
+| Nucleotide Transformer v2, zero-shot | 0.542 [0.512, 0.573] | 0.133 | 0.046 | 0.572 |
+
+Every language model is significantly below CADD (DeLong's test, p < 0.001). Fine-tuning adds about 0.11 AUROC over a frozen backbone for both transformers. ClinVar release 2026-11-15; split by gene (80/10/10) with a random subset of each split.
 
 ---
 
@@ -46,7 +60,8 @@ ClinVar (GRCh38, fixed release)
 ## Repository layout
 
 ```
-configs/            default.yaml (full study), smoke.yaml (quick check)
+configs/            default.yaml (full study), colab.yaml (reduced Colab run), smoke.yaml
+notebooks/          run_experiments_colab.ipynb
 scripts/            download_data.sh, run_all.sh, pick_learning_rates.py
 src/glmvar/
   data/             clinvar.py · sequences.py · split.py · vep.py
@@ -65,7 +80,7 @@ results/            tables and figures (generated)
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-user>/glm-variant-pathogenicity.git
+git clone https://github.com/Yasmin-maker1/glm-variant-pathogenicity.git
 cd glm-variant-pathogenicity
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[bio,dev]"
@@ -98,6 +113,10 @@ Smoke test with tiny settings: `glmvar --config configs/smoke.yaml train --model
 ```bash
 bash scripts/run_all.sh
 ```
+
+### Run on Google Colab (free GPU)
+
+Open [`notebooks/run_experiments_colab.ipynb`](notebooks/run_experiments_colab.ipynb) in Colab, choose a T4 GPU and **Run all**. It uses `configs/colab.yaml` (reduced run, ~3–4 hours), saves progress to Google Drive and ends by downloading `results_bundle.zip`. CADD scores are read directly from the CADD server, so the 80 GB file is not needed.
 
 ### CADD baseline without the 80 GB file
 
